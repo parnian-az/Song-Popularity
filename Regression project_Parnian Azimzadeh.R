@@ -1,0 +1,285 @@
+#Classification Project - song song_popularity
+#Parnian Azimzadeh
+#July 2022
+
+#Loading Packages
+library(caret)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(ggExtra)
+library(plotly)
+library(viridis)
+library(hrbrthemes)
+library(GGally)
+
+library(rpart)
+library(rpart.plot)
+library(dplyr)
+library(caret)
+
+
+#Load Data
+song = read.csv(file = 'song_data.csv')
+song = song %>% 
+  select(-c(key,instrumentalness,audio_mode,time_signature,liveness,loudness,energy,acousticness)) %>% 
+  select(-song_popularity, everything())
+
+
+any(duplicated(song$song_name))
+
+song = song %>% 
+  group_by(song_name,) %>% 
+  summarise(
+    song_duration_m = mean(song_duration_ms),
+    danceability  = mean(danceability),
+    speechiness = mean(speechiness),
+    tempo   = mean(tempo),
+    audio_valence   = mean(audio_valence),
+    song_popularity = mean(song_popularity))
+    
+any(duplicated(song$song_name))
+
+
+#Correlation plot
+lowerFn <- function(data, mapping, method = "lm", ...) {
+  p <- ggplot(data = data, mapping = mapping) +
+    geom_point(colour = "blue") +
+    geom_smooth(method = method, color = "red", ...)
+  p}
+
+
+#Detect outliers
+library(BBmisc)
+song_norm = normalize(song[,-1], method = "range", range = c(-10, 10))
+boxplot(song_norm,col = (2:7),main = "Detecting outliers with boxplot")
+summary(song_norm)
+
+
+#Data Split
+#Train and Test
+set.seed(42)
+song_trn_idx = sample(nrow(song), size = 0.8* nrow(song))
+song_trn = song[song_trn_idx,]
+song_tst = song[-song_trn_idx,]
+
+#Estimation and Validation split
+song_est_idx = sample(nrow(song_trn), size = 0.8* nrow(song_trn))
+song_est = song_trn[song_est_idx,]
+song_val = song_trn[-song_est_idx,]
+
+
+
+
+#Normalization for estimation data
+song_est$song_duration_m.s = scale(song_est$song_duration_m)
+song_duration_m.center = attr(song_est$song_duration_m.s,"scaled:center")
+song_duration_m.scale = attr(song_est$song_duration_m.s,"scaled:scale")
+
+song_est$danceability.s = scale(song_est$danceability)
+danceabilitys.center = attr(song_est$danceability.s,"scaled:center")
+danceabilitys.scale = attr(song_est$danceability.s,"scaled:scale")
+
+song_est$speechiness.s = scale(song_est$speechiness)
+speechiness.center = attr(song_est$speechiness.s,"scaled:center")
+speechiness.scale = attr(song_est$speechiness.s,"scaled:scale")
+
+song_est$tempo.s = scale(song_est$tempo)
+tempo.center = attr(song_est$tempo.s,"scaled:center")
+tempo.scale = attr(song_est$tempo.s,"scaled:scale")
+
+song_est$audio_valence.s = scale(song_est$audio_valence)
+audio_valence.center = attr(song_est$audio_valence.s,"scaled:center")
+audio_valence.scale = attr(song_est$audio_valence.s,"scaled:scale")
+
+song_est$song_popularity.s = scale(song_est$song_popularity)
+song_popularity.center = attr(song_est$song_popularity.s,"scaled:center")
+song_popularity.scale = attr(song_est$song_popularity.s,"scaled:scale")
+
+song_est_norm = song_est[,7:13]
+song_est_norm = song_est_norm %>% 
+  select(-song_popularity, everything())
+song_est = song_est[,1:7]
+
+#Normalization for validation data
+song_val$song_duration_m.s = scale(song_val$song_duration_m, center = song_duration_m.center, scale = song_duration_m.scale)
+
+song_val$danceability.s = scale(song_val$danceability, center = danceabilitys.center, scale = danceabilitys.scale)
+
+song_val$speechiness.s = scale(song_val$speechiness, center = speechiness.center, scale = speechiness.scale)
+
+song_val$tempo.s = scale(song_val$tempo, center = tempo.center, scale = tempo.scale)
+
+song_val$audio_valence.s = scale(song_val$audio_valence, center = audio_valence.center, scale = audio_valence.scale)
+
+song_val$song_popularity.s = scale(song_val$song_popularity, center = song_popularity.center, scale = song_popularity.scale)
+
+song_val_norm = song_val[,7:13]
+song_val_norm = song_val_norm %>% 
+  select(-song_popularity, everything())
+song_val = song_val[,1:7]
+
+calc_rmse = function(actual, predicted){
+  sqrt(mean((actual-predicted)^2))}
+
+
+#KNN tune
+k = seq(1,21)
+knn_test = function(K){
+  knnreg(song_popularity~., data = song_est_norm, k = K)}
+knn_mods = lapply(k,knn_test)
+knn_value_pred = lapply(knn_mods,predict,song_val_norm)
+knn_rmse = sapply(knn_value_pred,calc_rmse,actual = song_val_norm$song_popularity)
+plot(knn_rmse, main = "RMSE Comparission For Each K value", xlab = "K values", ylab = "RMSE",type = "b", col = "blue", lwd = 2)
+bestK = which(min(knn_rmse)== knn_rmse)
+
+
+#CP and Minsplit tune
+tree_mod_list = list(
+  tree_mod0 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.0001 , minsplit = 5),
+  tree_mod1 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.0001 , minsplit = 10),
+  tree_mod2 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.0001 , minsplit = 25),
+  tree_mod3 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.001 , minsplit = 5),
+  tree_mod4 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.001 , minsplit = 10),
+  tree_mod5 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.001 , minsplit = 25),
+  tree_mod6 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.005 , minsplit = 5),
+  tree_mod7 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.005 , minsplit = 10),
+  tree_mod8 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.005 , minsplit = 25),
+  tree_mod9 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.01 , minsplit = 5),
+  tree_mod10 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.01 , minsplit = 10),
+  tree_mod11 = rpart(song_popularity~. , data = song_est[,-1], cp = 0.01 , minsplit = 25))
+
+tree_val_pred = lapply(tree_mod_list,predict,song_val[,-1])
+tree_rmse_val = sapply(tree_val_pred,calc_rmse,actual = song_val[,-1]$song_popularity)
+plot(tree_rmse_val, main = "RMSE Comparission For Different CP and Minsplits", xlab = "Models", ylab = "RMSE",type = "b", col = "purple", lwd = 2)
+
+tree_est_pred = lapply(tree_mod_list,predict,song_est[,-1])
+tree_rmse_est = sapply(tree_est_pred,calc_rmse,actual = song_est[,-1]$song_popularity)
+
+
+tree_model = data.frame(
+  "CP values" = c(rep(formatC(0.0001, digits = 4),3),rep(formatC(0.001, digits = 3),3),rep(formatC(0.005, digits = 3),3),rep(formatC(0.01, digits = 2),3)),
+  "Minsplit values" = c(5,10,25,5,10,25,5,10,25,5,10,25),
+  "Estimation RMSE" = tree_rmse_est,
+  "Validation RMSE" = tree_rmse_val)
+rownames(tree_model) = paste0("Tree Model",1:12)
+
+tree_model %>%
+  kbl(caption = "RMSE For Each Decision Tree Model") %>%
+  kable_classic(full_width = F, html_font = "Times New Roman")
+bestCP = 0.01
+bestMS = 25
+
+
+#Models
+reg_models_est = c(
+  calc_rmse(song_est$song_popularity,predict(lm(song_popularity~ danceability, data = song_est),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm(song_popularity~ danceability+ audio_valence, data = song_est),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm(song_popularity~ ., data = song_est[,-1]),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm(song_popularity~ poly(danceability,2), data = song_est),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm(song_popularity~ poly(danceability,2)+ poly(audio_valence,2)+ danceability:audio_valence, data = song_est),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm((reformulate(paste0('poly(',colnames(song[,c(-1,-7)]),',2)') , response = "song_popularity")), data = song_est),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm((reformulate(paste0('poly(',colnames(song[,c(-1,-7)]),',3)') , response = "song_popularity")), data = song_est),song_est)),
+  calc_rmse(song_est$song_popularity,predict(lm((reformulate(paste0('poly(',colnames(song[,c(-1,-7)]),',5)') , response = "song_popularity")), data = song_est),song_est)),
+  calc_rmse(song_est_norm$song_popularity,predict(knnreg(song_popularity~., data = song_est_norm, k = bestK),song_est_norm)),
+  calc_rmse(song_est_norm$song_popularity,predict(rpart(song_popularity~. , data = song_est_norm, cp = 0.01 , minsplit = 25),song_est_norm)))
+
+
+reg_models_val = c(
+  calc_rmse(song_val$song_popularity,predict(lm(song_popularity~ danceability, data = song_est),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm(song_popularity~ danceability+ audio_valence, data = song_est),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm(song_popularity~ ., data = song_est[,-1]),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm(song_popularity~ poly(danceability,2), data = song_est),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm(song_popularity~ poly(danceability,2)+ poly(audio_valence,2)+ danceability:audio_valence, data = song_est),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm((reformulate(paste0('poly(',colnames(song[,c(-1,-7)]),',2)') , response = "song_popularity")), data = song_est),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm((reformulate(paste0('poly(',colnames(song[,c(-1,-7)]),',3)') , response = "song_popularity")), data = song_est),song_val)),
+  calc_rmse(song_val$song_popularity,predict(lm((reformulate(paste0('poly(',colnames(song[,c(-1,-7)]),',5)') , response = "song_popularity")), data = song_est),song_val)),
+  calc_rmse(song_val_norm$song_popularity,predict(knnreg(song_popularity~., data = song_est_norm, k = bestK),song_val_norm)),
+  calc_rmse(song_val_norm$song_popularity,predict(rpart(song_popularity~. , data = song_est_norm, cp = 0.01 , minsplit = 25),song_val_norm)))
+
+
+# store results in data frame
+song_results = data.frame(
+  "Method" = paste0("Model",1:10),
+  "Estimation Error" = reg_models_est,
+  "Validation Error" = reg_models_val)
+
+song_results %>%
+  kbl(caption = "Calculation of RMSE for each Model") %>%
+  kable_classic(full_width = F, html_font = "Times New Roman")
+
+
+
+
+
+#Normalization for Train data
+song_trn$song_duration_m.s = scale(song_trn$song_duration_m)
+song_duration_m.center = attr(song_trn$song_duration_m.s,"scaled:center")
+song_duration_m.scale = attr(song_trn$song_duration_m.s,"scaled:scale")
+
+song_trn$danceability.s = scale(song_trn$danceability)
+danceabilitys.center = attr(song_trn$danceability.s,"scaled:center")
+danceabilitys.scale = attr(song_trn$danceability.s,"scaled:scale")
+
+song_trn$speechiness.s = scale(song_trn$speechiness)
+speechiness.center = attr(song_trn$speechiness.s,"scaled:center")
+speechiness.scale = attr(song_trn$speechiness.s,"scaled:scale")
+
+song_trn$tempo.s = scale(song_trn$tempo)
+tempo.center = attr(song_trn$tempo.s,"scaled:center")
+tempo.scale = attr(song_trn$tempo.s,"scaled:scale")
+
+song_trn$audio_valence.s = scale(song_trn$audio_valence)
+audio_valence.center = attr(song_trn$audio_valence.s,"scaled:center")
+audio_valence.scale = attr(song_trn$audio_valence.s,"scaled:scale")
+
+song_trn$song_popularity.s = scale(song_trn$song_popularity)
+song_popularity.center = attr(song_trn$song_popularity.s,"scaled:center")
+song_popularity.scale = attr(song_trn$song_popularity.s,"scaled:scale")
+
+song_trn_norm = song_trn[,7:13]
+song_trn_norm = song_trn_norm %>% 
+  select(-song_popularity, everything())
+song_trn = song_trn[,1:7]
+
+#Normalization for Test data
+song_tst$song_duration_m.s = scale(song_tst$song_duration_m, center = song_duration_m.center, scale = song_duration_m.scale)
+
+song_tst$danceability.s = scale(song_tst$danceability, center = danceabilitys.center, scale = danceabilitys.scale)
+
+song_tst$speechiness.s = scale(song_tst$speechiness, center = speechiness.center, scale = speechiness.scale)
+
+song_tst$tempo.s = scale(song_tst$tempo, center = tempo.center, scale = tempo.scale)
+
+song_tst$audio_valence.s = scale(song_tst$audio_valence, center = audio_valence.center, scale = audio_valence.scale)
+
+song_tst$song_popularity.s = scale(song_tst$song_popularity, center = song_popularity.center, scale = song_popularity.scale)
+
+song_tst_norm = song_tst[,7:13]
+song_tst_norm = song_tst_norm %>% 
+  select(-song_popularity, everything())
+song_tst = song_tst[,1:7]
+
+
+#Final Model
+knn_train_error = calc_rmse(song_trn_norm$song_popularity,predict(knnreg(song_popularity~., data = song_trn_norm[,-1], k = bestK),song_trn_norm))
+knn_test_error = calc_rmse(song_tst_norm$song_popularity,predict(knnreg(song_popularity~., data = song_trn_norm[,-1], k = bestK),song_tst_norm))
+knn_model = data.frame(
+  "Dataset" = "Error",
+  "Train data Error" = knn_train_error,
+  "Test data Error" = knn_test_error)
+knn_model %>%
+  kbl(caption = "Ultimate RMSE For KNN Model") %>%
+  kable_classic(full_width = F, html_font = "Times New Roman")
+
+
+
+
+
+
+
+
+
+
+
